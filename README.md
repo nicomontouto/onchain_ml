@@ -39,6 +39,8 @@ El modelo XGBoost superó al LSTM en todas las frecuencias evaluadas. Se identif
 
 2. **Exceso de features**: El conjunto de features construido es amplio (técnicos + on-chain + sentimiento), lo cual incrementa el riesgo de overfitting, especialmente en la LSTM. Se está trabajando en selección de features y reducción de dimensionalidad para evaluar correctamente el peso real de la distribución del token como predictor en este tipo de activo.
 
+3. **Las variables de distribución tuvieron mayor peso en la frecuencia daily**: Se observó que las features de distribución de holders (concentración, wallets activas, participación de grandes tenedores) resultaron más relevantes en el modelo daily que en el de 4h. Esto es esperable: los datos de distribución del token se obtienen con granularidad diaria desde Dune Analytics, por lo que al usarlos en frecuencias intradiarias (4h) se aplica un forward-fill que congela el valor durante las velas del día, introduciendo ruido artificial y diluyendo su señal. En el modelo daily, cada observación corresponde directamente a un dato real de distribución, maximizando su poder predictivo.
+
 Ver `reporte_uni_ml_v3.pdf` para el informe completo con curvas de equity, drawdowns, métricas de validación y ranking de importancia de features.
 
 ## Variantes de Estrategia (V3)
