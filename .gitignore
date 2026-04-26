@@ -23,6 +23,11 @@ env/
 data/cache/
 data/processed/
 
+# Reports, PDF generator and generated figures
+*.pdf
+generate_report_v5.py
+data/figures_v5/
+
 # OS
 .DS_Store
 Thumbs.db

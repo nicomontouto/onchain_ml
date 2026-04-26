@@ -1,104 +1,119 @@
 # Onchain ML — Pipeline de Trading Algorítmico con Datos On-Chain (UNI/USDT)
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?logo=pytorch)
 ![XGBoost](https://img.shields.io/badge/XGBoost-2.0%2B-189fdd)
+![LightGBM](https://img.shields.io/badge/LightGBM-4.0%2B-2ecc71)
+![scikit-learn](https://img.shields.io/badge/scikit--learn-1.4%2B-f7931e?logo=scikit-learn)
 
 ## Descripción
 
-Pipeline end-to-end de machine learning para construir y backtestear estrategias de trading algorítmico sobre el par UNI/USDT. El proyecto combina métricas **on-chain del protocolo Uniswap** con **datos de precio** e **indicadores de sentimiento de mercado** para entrenar clasificadores que predicen la dirección del precio en el siguiente período.
+Pipeline end-to-end de machine learning para construir y backtestear estrategias de trading algorítmico sobre el par UNI/USDT. El proyecto combina métricas **on-chain del protocolo Uniswap** con **datos de precio de Binance** y **actividad de transferencias on-chain** para entrenar clasificadores que predicen la dirección del precio en el siguiente período de 4 horas.
 
-El pipeline genera señales LONG/SHORT/FLAT y simula una cuenta de capital real, comparando el desempeño contra un benchmark Buy & Hold.
+El pipeline genera señales LONG/SHORT/FLAT y simula una cuenta de capital real ($10,000), comparando el desempeño contra un benchmark Buy & Hold con capital completo expuesto.
 
-## Desafío: Obtención de Datos
+Este proyecto es de carácter académico/exploratorio, no está pensado para producción.
 
-El primer obstáculo del proyecto fue encontrar fuentes de datos gratuitas, confiables y con suficiente granularidad. Se utilizaron tres fuentes principales:
+---
 
-- **Binance API** — Precio histórico del token UNI con velas de 1 hora (OHLCV), cubriendo aproximadamente 5 años de historia.
-- **The Graph** — Métricas del protocolo Uniswap v3 on-chain: TVL, volumen de swaps, ingresos por comisiones, posiciones activas y profundidad de liquidez.
-- **Dune Analytics** — Distribución de holders del token UNI: concentración por ballenas, número de wallets activas y evolución de la distribución en el tiempo.
-- **Fear & Greed Index** — Indicador de sentimiento del mercado cripto (frecuencia diaria, interpolado a frecuencias intradiarias).
+## Fuentes de Datos
 
-La hipótesis central es que la **distribución del token** —quién tiene UNI y cómo cambia esa concentración— puede ser un predictor relevante del precio en tokens de capitalización media, donde el comportamiento de los grandes tenedores tiene mayor impacto relativo que en tokens de muy alta liquidez.
+El primer desafío fue encontrar fuentes de datos gratuitas, confiables y con suficiente granularidad horaria. Se utilizaron cuatro fuentes:
 
-## Modelos
+| Fuente | Granularidad | Datos obtenidos |
+|--------|-------------|-----------------|
+| **Binance API** | 1h | OHLCV histórico de UNI/USDT (~5 años) |
+| **The Graph** | 1h | Métricas del protocolo Uniswap v3: volumen DEX, TVL, precio on-chain, fees |
+| **Dune Analytics** | 1h | Actividad de transferencias UNI: cantidad, volumen, wallets únicas, actividad de ballenas |
+| **Dollar Bars** | Variable | Duración promedio de barras de $6.9M de volumen negociado (~10,000 barras) |
 
-Se evaluaron dos enfoques de clasificación:
+### Dollar Bars
 
-### Gradient Boosting (XGBoost)
-Clasificador basado en árboles con optimización por gradiente. Se entrenó con validación walk-forward para evitar data leakage y se realizó búsqueda de hiperparámetros. **Produjo los resultados más consistentes y determinantes del proyecto.**
+En lugar de usar barras de tiempo fijas, se construyeron **dollar bars**: barras que se completan cada vez que se acumulan $6.9M de volumen negociado en Binance. Este umbral fue elegido para producir aproximadamente 10,000 barras a lo largo del dataset (~4.4h promedio por barra). La feature `dollar_bar_duration` captura cuánto tiempo tardó en completarse la última barra, aportando información sobre la intensidad del flujo de capital independiente del tiempo.
 
-### Red Neuronal Recurrente (LSTM)
-Red de memoria a largo-corto plazo, adecuada para capturar dependencias temporales en series de tiempo financieras. Sin embargo, la cantidad de datos disponibles resultó insuficiente para entrenar un modelo con la complejidad de parámetros empleada, lo que limitó su capacidad de generalización.
+### Descartado: Distribución de Token y Sentimiento
 
-## Resultados y Limitaciones
+Versiones anteriores del proyecto usaban datos de **distribución de holders** (concentración por ballenas, Herfindahl index, crecimiento de wallets) y el **Fear & Greed Index** obtenidos con granularidad diaria. Estas fuentes fueron descartadas en v5 por introducir **data leakage**: al asignar un valor diario a cada barra de 4h dentro del mismo día, el modelo accedía implícitamente a información del futuro durante el entrenamiento, inflando artificialmente las métricas.
 
-El modelo XGBoost superó al LSTM en todas las frecuencias evaluadas. Se identificaron dos problemas principales que se están trabajando actualmente:
+---
 
-1. **Volumen de datos insuficiente para la LSTM**: La cantidad de muestras disponibles —limitada por el historial del protocolo Uniswap v3 y la frecuencia de las métricas on-chain— no es suficiente para entrenar redes recurrentes con el número de parámetros utilizado sin caer en sobreajuste.
+## Decisiones de Diseño
 
-2. **Exceso de features**: El conjunto de features construido es amplio (técnicos + on-chain + sentimiento), lo cual incrementa el riesgo de overfitting, especialmente en la LSTM. Se está trabajando en selección de features y reducción de dimensionalidad para evaluar correctamente el peso real de la distribución del token como predictor en este tipo de activo.
+### Solo frecuencia 4h
 
-3. **Las variables de distribución tuvieron mayor peso en la frecuencia daily**: Se observó que las features de distribución de holders (concentración, wallets activas, participación de grandes tenedores) resultaron más relevantes en el modelo daily que en el de 4h. Esto es esperable: los datos de distribución del token se obtienen con granularidad diaria desde Dune Analytics, por lo que al usarlos en frecuencias intradiarias (4h) se aplica un forward-fill que congela el valor durante las velas del día, introduciendo ruido artificial y diluyendo su señal. En el modelo daily, cada observación corresponde directamente a un dato real de distribución, maximizando su poder predictivo.
+Se evaluaron inicialmente frecuencias 4h y daily. La frecuencia daily fue descartada por **escasez de datos**: con ~1,825 barras diarias disponibles, no hay suficientes muestras para entrenar modelos de ML robustos con validación walk-forward. La frecuencia 4h con ~10,000 barras es la única viable.
 
-Ver `reporte_uni_ml_v3.pdf` para el informe completo con curvas de equity, drawdowns, métricas de validación y ranking de importancia de features.
+### Descarte de LSTM y GRU
 
-## Variantes de Estrategia (V3)
+Versiones anteriores exploraron redes neuronales recurrentes (LSTM, GRU) para capturar dependencias temporales. Fueron descartadas porque la cantidad de datos disponible es insuficiente para entrenar modelos con esa complejidad de parámetros sin caer en sobreajuste. Se optó por modelos más simples: XGBoost, LightGBM y un MLP de dos capas ocultas (16×3 neuronas).
 
-| Variante | Modelo | Lógica de señal |
-|----------|--------|----------------|
-| A | XGBoost | Umbral de probabilidad fijo |
-| B | XGBoost | Umbral dinámico ajustado por Fear & Greed Index |
-| C | LSTM | Umbral fijo asimétrico (sesgo largo) |
-| BH | — | Buy & Hold (benchmark) |
+### Reducción de 180 a 10 features
 
-Frecuencias evaluadas: **4h** y **daily** (1h descartada tras ablación).
+El proyecto comenzó con ~180 features entre técnicas, on-chain y sentimiento. Se realizó un proceso de selección en tres etapas:
 
-## Features Utilizadas
+1. **Eliminación por leakage**: se removieron todas las features de granularidad diaria (whale_balance_pct, herfindahl_index, holders_growth, fear_greed_value).
+2. **Análisis de correlación no lineal**: se calculó Mutual Information (MI), Distance Correlation (dCor) y Spearman rank correlation entre cada feature y el label.
+3. **Filtro de redundancia**: se eliminaron features con correlación de Pearson > 0.85 entre sí, priorizando las de mayor información con el target.
 
-**Precio (técnicos):** retornos, log-retornos, RSI, MACD, Bandas de Bollinger, ATR, ratios de volumen.
+Las features supervivientes presentaron valores de MI y dCor consistentemente por encima de cero, indicando que contienen información potencialmente valiosa para la predicción de la señal de precio.
 
-**On-chain (Uniswap v3):** TVL, volumen de swaps, ingresos por fees, posiciones activas, profundidad de liquidez.
+**Features finales (10):**
 
-**Distribución del token (Dune):** concentración de holders, número de wallets activas, participación de grandes tenedores.
+| Feature | Fuente | Descripción |
+|---------|--------|-------------|
+| `log_return_lag1` | Binance | Log-retorno de la barra anterior |
+| `log_return_lag4` | Binance | Log-retorno de 4 barras atrás (16h) |
+| `volatility_24h` | Binance | Volatilidad rolling 6 barras (24h) |
+| `high_low_range` | Binance | Rango high-low normalizado por close |
+| `log_return_roll_std72` | Binance | Volatilidad rolling 18 barras (72h) |
+| `price_divergence` | Binance + The Graph | Divergencia precio CEX vs DEX |
+| `volumeUSD_roll_std72` | The Graph | Std del volumen DEX en 72h |
+| `transfer_count` | Dune | Transferencias UNI en el período de 4h |
+| `whale_volume_ratio` | Dune | Proporción del volumen movido por ballenas |
+| `dollar_bar_duration` | Binance (dollar bar) | Duración de la última barra de $6.9M |
 
-**Sentimiento:** Fear & Greed Index (diario, forward-filled a frecuencias intradiarias).
+---
+
+## Labeling: Triple Barrier Method
+
+Los labels se generan con el **Triple Barrier Method** de López de Prado (AFML):
+
+- **+1** — el precio sube 2× la volatilidad rolling antes de 48h
+- **-1** — el precio baja 2× la volatilidad rolling antes de 48h
+- **0** — el precio no toca ninguna barrera en 48h (neutral)
+
+Para reducir la correlación entre eventos solapados se aplica un **filtro CUSUM simétrico** que selecciona solo los momentos donde la acumulación de retornos supera la volatilidad promedio, reduciendo los eventos de ~10,900 a ~3,750 más independientes.
+
+Distribución de labels resultante: **+1=38%**, **0=25%**, **-1=37%** — balanceada entre las tres clases.
+
+---
+
+## Resultados
+
+Split temporal 80/20. Capital inicial $10,000. Trade size $500. Fee 0.1% por lado.
+El Buy & Hold invierte los $10,000 completos desde el inicio del período de test.
+
+| Modelo | Net P&L | Sharpe | Max DD | Accuracy | F1-macro | Trades | % Flat |
+|--------|---------|--------|--------|----------|----------|--------|--------|
+| XGB-4h | **+$75.82** | 0.330 | -4.60% | 0.431 | 0.411 | 89 | 44.0% |
+| LGBM-4h | +$21.60 | 0.112 | -4.84% | 0.424 | 0.395 | 94 | 42.8% |
+| MLP-4h | -$137.84 | -0.538 | -4.97% | 0.421 | 0.409 | 110 | 44.0% |
+| **Buy & Hold** | **-$3,408** | 0.167 | -74.82% | — | — | 1 | 0.0% |
+
+Los tres modelos superan al Buy & Hold ampliamente en términos de drawdown máximo (-5% vs -75%). El período de test coincidió con un mercado bajista severo para UNI, lo que hace que el benchmark sea especialmente desfavorable.
+
+Las ganancias absolutas son modestas, lo cual es coherente con labels sin leakage y un problema genuinamente difícil. Con más datos disponibles para backtesting hubiese sido posible validar la robustez de la estrategia en distintos regímenes de mercado, pero el dataset disponible no lo permitía sin comprometer el tamaño del set de entrenamiento.
+
+---
 
 ## Arquitectura del Pipeline
 
 ```
-fetch_data.py          → Descarga de datos (Binance, The Graph, Dune, Fear & Greed)
-feature_engineering.py → Construcción de features técnicas y on-chain
-process_data.py        → Limpieza, merge y etiquetado (target: signo del retorno)
-model_baseline.py      → XGBoost con validación walk-forward y tuning
-model_lstm.py          → Entrenamiento de la LSTM
-simulate_v3.py         → Simulación LONG/SHORT/FLAT con capital real en USD
-generate_report_v3.py  → Generación de reporte PDF
-main_v3.py             → Orquestador principal (corre el pipeline completo)
-```
-
-## Estructura del Proyecto
-
-```
-onchain_ml/
-├── fetch_data.py           # Ingesta de datos
-├── feature_engineering.py  # Construcción de features
-├── process_data.py         # Limpieza y etiquetado
-├── model_baseline.py       # XGBoost walk-forward + tuning
-├── model_lstm.py           # Entrenamiento LSTM
-├── evaluate.py             # Métricas de evaluación
-├── simulate_v3.py          # Backtester V3 LONG/SHORT/FLAT
-├── generate_report_v3.py   # Generación de reporte PDF
-├── main.py                 # Orquestador V2
-├── main_v3.py              # Orquestador V3 (punto de entrada recomendado)
-├── best_lstm.pt            # Pesos del modelo LSTM entrenado
-├── reporte_uni_ml_v3.pdf   # Reporte de resultados completo (V3)
-├── data/
-│   ├── thegraph_uni_protocol.csv   # Snapshot de métricas on-chain
-│   ├── dune_uni_holders.csv        # Snapshot de distribución de holders
-│   ├── figures/                    # Gráficos de resultados V2
-│   └── figures_v3/                 # Gráficos de resultados V3
-└── requirements.txt
+process_data_v5.py       → Carga, merge horario y resample a 4h
+feature_selection_v5.py  → Selección de features (MI + dCor + Spearman + correlación)
+triple_barrier_v4.py     → Labeling con Triple Barrier Method + filtro CUSUM
+models_v4.py             → XGBoost, LightGBM, MLP con walk-forward
+simulate_v4.py           → Simulación LONG/SHORT/FLAT + Buy & Hold
+main_v5.py               → Orquestador (punto de entrada)
 ```
 
 ## Uso
@@ -107,13 +122,7 @@ onchain_ml/
 pip install -r requirements.txt
 
 # Correr el pipeline completo
-python main_v3.py
-
-# Saltear el reentrenamiento de XGBoost (usa probabilidades cacheadas)
-python main_v3.py --skip-xgb-retrain
-
-# Forzar reentrenamiento completo
-python main_v3.py --no-cache
+python main_v5.py
 ```
 
 Los archivos de caché y datos procesados se generan localmente en `data/cache/` y `data/processed/` (ignorados por git).
@@ -123,18 +132,9 @@ Los archivos de caché y datos procesados se generan localmente en `data/cache/`
 | Herramienta | Rol |
 |-------------|-----|
 | Python 3.10+ | Lenguaje principal |
-| XGBoost | Clasificador de gradient boosting |
-| PyTorch | Modelo LSTM recurrente |
-| scikit-learn | Validación walk-forward y métricas |
+| XGBoost / LightGBM | Clasificadores de gradient boosting |
+| scikit-learn | MLP, validación walk-forward, métricas |
 | pandas / NumPy | Manipulación de datos |
-| requests / pyarrow | Llamadas a APIs y I/O en formato Parquet |
-| fpdf2 | Generación de reportes PDF |
+| The Graph API / Dune API / Binance API | Fuentes de datos |
+| pyarrow | I/O en formato Parquet |
 | matplotlib | Visualizaciones |
-
-## Trabajo Futuro
-
-- Selección y reducción de features para aislar el poder predictivo de la distribución del token.
-- Aumentar el volumen de datos históricos o explorar técnicas de data augmentation para mejorar el entrenamiento de la LSTM.
-- Evaluar arquitecturas más simples (GRU, modelos lineales con memoria) como baseline para la componente temporal.
-- Extender el análisis a otros tokens de capitalización similar con mayor historia on-chain.
-- Integrar feed en tiempo real de Binance para paper trading.
