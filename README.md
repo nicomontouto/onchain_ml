@@ -15,105 +15,115 @@ Este proyecto es de carácter académico/exploratorio, no está pensado para pro
 
 ---
 
-## Fuentes de Datos
+## Resultados (v6 — versión actual)
 
-El primer desafío fue encontrar fuentes de datos gratuitas, confiables y con suficiente granularidad horaria. Se utilizaron cuatro fuentes:
+Split temporal 80/20. Test: abril 2025 → abril 2026. Capital inicial $10,000. Trade size $500. Fee 0.1% por lado.
+
+| Modelo | Net P&L | Sharpe | Max DD | Trades | % Flat |
+|--------|---------|--------|--------|--------|--------|
+| XGB + vol filter | **+$333** | **1.448** | -2.90% | 64 | 73.6% |
+| MLP + vol filter | **+$426** | **1.561** | -2.89% | 77 | 58.4% |
+| LGBM + vol filter | **+$222** | **0.980** | -2.90% | 62 | 74.7% |
+| XGB (sin filtro) | +$269 | 0.819 | -4.21% | 123 | 25.3% |
+| **Buy & Hold** | **-$3,408** | 0.167 | -74.82% | 1 | 0.0% |
+
+El filtro de régimen de volatilidad (FLAT cuando la vol rolling 72h < mediana del train) mejora el Sharpe de ~0.8 a ~1.5 y reduce el MaxDD a la mitad.
+
+---
+
+## Arquitectura v6
+
+### Pipeline de dos modelos (Meta-Labeling — López de Prado cap. 3/4)
+
+```
+EMA9/EMA21 crossover  →  señal primaria (LONG o SHORT)
+        │
+        ▼
+Triple Barrier Method  →  labels: ¿fue la apuesta EMA correcta? {+1, 0, -1}
+        │
+        ├── M1 (LGBM/XGB/MLP)  →  ¿vale la pena apostar? P(activo)
+        │
+        └── M2 (LGBM/XGB/MLP)  →  ¿la apuesta EMA saldrá bien? P(correcto | activo)
+                │
+                ▼
+        P(+1) = P(activo) × P(correcto)   [si EMA dice LONG]
+        P(-1) = P(activo) × P(correcto)   [si EMA dice SHORT]
+        P(0)  = 1 - P(activo)
+                │
+                ▼
+        Filtro de vol: FLAT si vol_rolling < mediana_train
+```
+
+El modelo no predice si el precio va a subir o bajar directamente. Aprende a identificar cuándo la señal del cruce EMA es confiable.
+
+### Feature Selection: SFS doble con LGBM
+
+Dos SFS independientes (greedy forward, TimeSeriesSplit 5-fold, f1_macro):
+
+**M1** — activo vs neutral (k=11, f1_CV=0.550):
+`return_skew_72h, unique_senders, log_return_roll_std72, macd_histogram, fee_apr_proxy, price_divergence, rsi_14, body_ratio, stoch_d, amihud_illiquidity, bvc_imbalance`
+
+**M2** — apuesta correcta vs incorrecta (k=7, f1_CV=0.511):
+`log_return_lag4, bvc_imbalance, net_flow_proxy, macd_histogram, donchian_pos, fee_apr_proxy, volumeUSD_roll_std72`
+
+Los features de microestructura (`bvc_imbalance`, `amihud_illiquidity`) fueron seleccionados por el SFS — aparecen en ambos modelos.
+
+### Labeling: Triple Barrier con Side
+
+```
+ptSl = [2.0, 1.0]   →  PT = 2× volatilidad, SL = 1× volatilidad (ratio 2:1)
+t1   = 12 barras    →  horizonte máximo 48h
+side = EMA9/EMA21   →  barreras orientadas a la dirección de la apuesta
+
+label +1  →  PT tocado primero (EMA correcta, ganó)
+label -1  →  SL tocado primero (EMA equivocada, perdió)
+label 0   →  expiró en t1 sin tocar barreras
+```
+
+Distribución resultante: **+1=31.8%, 0=11.3%, -1=56.9%**. El cruce EMA falla el 57% de las veces — el trabajo de M2 es filtrar cuándo confiar en él.
+
+### Filtro de régimen de volatilidad
+
+El análisis por régimen mostró que los modelos son rentables en alta volatilidad y pierden en baja:
+
+| Régimen | LGBM | XGB | BH |
+|---------|------|-----|----|
+| Alta vol (369 eventos) | +$229 (Sharpe 0.978) | +$185 (Sharpe 0.791) | -$2,552 |
+| Baja vol (381 eventos) | -$66 (Sharpe -0.334) | -$12 (Sharpe -0.034) | -$3,408 |
+
+Threshold calculado sobre el train set (sin lookahead): mediana de `log_return_roll_std72`.
+
+---
+
+## Fuentes de Datos
 
 | Fuente | Granularidad | Datos obtenidos |
 |--------|-------------|-----------------|
 | **Binance API** | 1h | OHLCV histórico de UNI/USDT (~5 años) |
 | **The Graph** | 1h | Métricas del protocolo Uniswap v3: volumen DEX, TVL, precio on-chain, fees |
 | **Dune Analytics** | 1h | Actividad de transferencias UNI: cantidad, volumen, wallets únicas, actividad de ballenas |
-| **Dollar Bars** | Variable | Duración promedio de barras de $6.9M de volumen negociado (~10,000 barras) |
+| **Dollar Bars** | Variable | Duración promedio de barras de $6.9M de volumen negociado |
 
-### Dollar Bars
+### 45 features candidatas
 
-En lugar de usar barras de tiempo fijas, se construyeron **dollar bars**: barras que se completan cada vez que se acumulan $6.9M de volumen negociado en Binance. Este umbral fue elegido para producir aproximadamente 10,000 barras a lo largo del dataset (~4.4h promedio por barra). La feature `dollar_bar_duration` captura cuánto tiempo tardó en completarse la última barra, aportando información sobre la intensidad del flujo de capital independiente del tiempo.
-
-### Descartado: Distribución de Token y Sentimiento
-
-Versiones anteriores del proyecto usaban datos de **distribución de holders** (concentración por ballenas, Herfindahl index, crecimiento de wallets) y el **Fear & Greed Index** obtenidos con granularidad diaria. Estas fuentes fueron descartadas en v5 por introducir **data leakage**: al asignar un valor diario a cada barra de 4h dentro del mismo día, el modelo accedía implícitamente a información del futuro durante el entrenamiento, inflando artificialmente las métricas.
-
----
-
-## Decisiones de Diseño
-
-### Solo frecuencia 4h
-
-Se evaluaron inicialmente frecuencias 4h y daily. La frecuencia daily fue descartada por **escasez de datos**: con ~1,825 barras diarias disponibles, no hay suficientes muestras para entrenar modelos de ML robustos con validación walk-forward. La frecuencia 4h con ~10,000 barras es la única viable.
-
-### Descarte de LSTM y GRU
-
-Versiones anteriores exploraron redes neuronales recurrentes (LSTM, GRU) para capturar dependencias temporales. Fueron descartadas porque la cantidad de datos disponible es insuficiente para entrenar modelos con esa complejidad de parámetros sin caer en sobreajuste. Se optó por modelos más simples: XGBoost, LightGBM y un MLP de dos capas ocultas (16×3 neuronas).
-
-### Reducción de 180 a 10 features
-
-El proyecto comenzó con ~180 features entre técnicas, on-chain y sentimiento. Se realizó un proceso de selección en tres etapas:
-
-1. **Eliminación por leakage**: se removieron todas las features de granularidad diaria (whale_balance_pct, herfindahl_index, holders_growth, fear_greed_value).
-2. **Análisis de correlación no lineal**: se calculó Mutual Information (MI), Distance Correlation (dCor) y Spearman rank correlation entre cada feature y el label.
-3. **Filtro de redundancia**: se eliminaron features con correlación de Pearson > 0.85 entre sí, priorizando las de mayor información con el target.
-
-Las features supervivientes presentaron valores de MI y dCor consistentemente por encima de cero, indicando que contienen información potencialmente valiosa para la predicción de la señal de precio.
-
-**Features finales (10):**
-
-| Feature | Fuente | Descripción |
-|---------|--------|-------------|
-| `log_return_lag1` | Binance | Log-retorno de la barra anterior |
-| `log_return_lag4` | Binance | Log-retorno de 4 barras atrás (16h) |
-| `volatility_24h` | Binance | Volatilidad rolling 6 barras (24h) |
-| `high_low_range` | Binance | Rango high-low normalizado por close |
-| `log_return_roll_std72` | Binance | Volatilidad rolling 18 barras (72h) |
-| `price_divergence` | Binance + The Graph | Divergencia precio CEX vs DEX |
-| `volumeUSD_roll_std72` | The Graph | Std del volumen DEX en 72h |
-| `transfer_count` | Dune | Transferencias UNI en el período de 4h |
-| `whale_volume_ratio` | Dune | Proporción del volumen movido por ballenas |
-| `dollar_bar_duration` | Binance (dollar bar) | Duración de la última barra de $6.9M |
+El pool de features que entra al SFS incluye:
+- **Técnicas**: RSI, MACD, Bollinger Bands, ATR, Stochastic, CCI, Williams %R, ROC, OBV, MFI, EMA ratio, ADX, Donchian, VWAP deviation
+- **Direccionales (para M2)**: body_ratio, wicks, bb_pct_b, lags cortos (1-8 barras)
+- **On-chain**: fee_apr_proxy, tvl_change_pct, unique_senders, net_flow_proxy, transfer_count, whale_volume_ratio, price_divergence
+- **Microestructura (LdP cap. 19)**: BVC imbalance, Amihud illiquidity, Roll's spread
 
 ---
 
-## Labeling: Triple Barrier Method
-
-Los labels se generan con el **Triple Barrier Method** de López de Prado (AFML):
-
-- **+1** — el precio sube 2× la volatilidad rolling antes de 48h
-- **-1** — el precio baja 2× la volatilidad rolling antes de 48h
-- **0** — el precio no toca ninguna barrera en 48h (neutral)
-
-Para reducir la correlación entre eventos solapados se aplica un **filtro CUSUM simétrico** que selecciona solo los momentos donde la acumulación de retornos supera la volatilidad promedio, reduciendo los eventos de ~10,900 a ~3,750 más independientes.
-
-Distribución de labels resultante: **+1=38%**, **0=25%**, **-1=37%** — balanceada entre las tres clases.
-
----
-
-## Resultados
-
-Split temporal 80/20. Capital inicial $10,000. Trade size $500. Fee 0.1% por lado.
-El Buy & Hold invierte los $10,000 completos desde el inicio del período de test.
-
-| Modelo | Net P&L | Sharpe | Max DD | Accuracy | F1-macro | Trades | % Flat |
-|--------|---------|--------|--------|----------|----------|--------|--------|
-| XGB-4h | **+$75.82** | 0.330 | -4.60% | 0.431 | 0.411 | 89 | 44.0% |
-| LGBM-4h | +$21.60 | 0.112 | -4.84% | 0.424 | 0.395 | 94 | 42.8% |
-| MLP-4h | -$137.84 | -0.538 | -4.97% | 0.421 | 0.409 | 110 | 44.0% |
-| **Buy & Hold** | **-$3,408** | 0.167 | -74.82% | — | — | 1 | 0.0% |
-
-Los tres modelos superan al Buy & Hold ampliamente en términos de drawdown máximo (-5% vs -75%). El período de test coincidió con un mercado bajista severo para UNI, lo que hace que el benchmark sea especialmente desfavorable.
-
-Las ganancias absolutas son modestas, lo cual es coherente con labels sin leakage y un problema genuinamente difícil. Con más datos disponibles para backtesting hubiese sido posible validar la robustez de la estrategia en distintos regímenes de mercado, pero el dataset disponible no lo permitía sin comprometer el tamaño del set de entrenamiento.
-
----
-
-## Arquitectura del Pipeline
+## Estructura del Proyecto
 
 ```
-process_data_v5.py       → Carga, merge horario y resample a 4h
-feature_selection_v5.py  → Selección de features (MI + dCor + Spearman + correlación)
-triple_barrier_v4.py     → Labeling con Triple Barrier Method + filtro CUSUM
-models_v4.py             → XGBoost, LightGBM, MLP con walk-forward
-simulate_v4.py           → Simulación LONG/SHORT/FLAT + Buy & Hold
-main_v5.py               → Orquestador (punto de entrada)
+process_data_v5.py      → Carga, merge horario, resample a 4h, 45+ features
+triple_barrier_v4.py    → Triple Barrier con side (EMA) y ptSl asimétrico
+meta_labeling_v6.py     → SFS doble, MetaPipeline (M1+M2), predict_proba side-aware
+simulate_v4.py          → Simulación LONG/SHORT/FLAT + Buy & Hold + métricas financieras
+main_v6.py              → Orquestador principal (punto de entrada)
+vol_regime_analysis.py  → Análisis de rendimiento por régimen de volatilidad
+feature_selection_v6.py → SFS standalone (multiclase, para exploración)
 ```
 
 ## Uso
@@ -121,11 +131,14 @@ main_v5.py               → Orquestador (punto de entrada)
 ```bash
 pip install -r requirements.txt
 
-# Correr el pipeline completo
-python main_v5.py
+# Pipeline completo (SFS + entrenamiento + simulación)
+python3 main_v6.py
+
+# Análisis por régimen de volatilidad
+python3 vol_regime_analysis.py
 ```
 
-Los archivos de caché y datos procesados se generan localmente en `data/cache/` y `data/processed/` (ignorados por git).
+Los datos procesados se generan en `data/cache/` y `data/processed/` (ignorados por git).
 
 ## Stack Tecnológico
 
@@ -133,8 +146,18 @@ Los archivos de caché y datos procesados se generan localmente en `data/cache/`
 |-------------|-----|
 | Python 3.10+ | Lenguaje principal |
 | XGBoost / LightGBM | Clasificadores de gradient boosting |
-| scikit-learn | MLP, validación walk-forward, métricas |
+| scikit-learn | MLP, TimeSeriesSplit, métricas |
 | pandas / NumPy | Manipulación de datos |
 | The Graph API / Dune API / Binance API | Fuentes de datos |
 | pyarrow | I/O en formato Parquet |
 | matplotlib | Visualizaciones |
+
+---
+
+## Evolución del Proyecto
+
+| Versión | Cambio principal | Mejor Sharpe |
+|---------|-----------------|--------------|
+| v4 | Triple Barrier + CUSUM, 3 modelos base | ~0.3 |
+| v5 | Sin leakage, 10 features via MI+dCor+Spearman | 0.33 |
+| v6 | Meta-labeling + side EMA + filtro vol | **1.56** |
