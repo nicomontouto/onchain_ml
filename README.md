@@ -15,6 +15,22 @@ Este proyecto es de carácter académico/exploratorio, no está pensado para pro
 
 ---
 
+## Actualizaciones v6
+
+En esta versión se incorporaron tres cambios principales que transformaron el rendimiento del pipeline:
+
+**Sequential Feature Selection (SFS).** Se reemplazó el proceso manual de selección de features por un algoritmo SFS greedy forward usando LightGBM como estimador. El SFS evalúa, en cada paso, qué feature agrega más información útil para la predictibilidad del mercado usando validación cruzada temporal (TimeSeriesSplit). De esta forma el modelo selecciona automáticamente las features más relevantes del pool de 45 candidatas.
+
+**Meta-labeling (dos modelos).** Se pasó de un único clasificador a una arquitectura de dos modelos:
+- **M1** decide si hay trade o no hay trade (activo vs neutral)
+- **M2** decide la dirección del trade (la apuesta del EMA será correcta o no)
+
+Cada modelo recibió su propio conjunto de features, seleccionadas de forma independiente por el SFS con LGBM. Esto permite que cada modelo se especialice en una tarea distinta.
+
+**Side en el Triple Barrier Method.** Al implementar meta-labeling y no ver mejoras en las métricas, se identificó que el problema estaba en el labeling. El Triple Barrier Method original generaba labels simétricos ({+1, -1, 0}) sin tener en cuenta la dirección de la apuesta. Se incorporó el parámetro `side` usando la señal del cruce de EMAs (EMA9/EMA21), de forma que las barreras se orientan en la dirección de cada apuesta. Así, el label +1 significa "la apuesta del EMA fue correcta" y el label -1 significa "la apuesta falló", lo que alinea el labeling con lo que los modelos necesitan aprender.
+
+---
+
 ## Resultados (v6 — versión actual)
 
 Split temporal 80/20. Test: abril 2025 → abril 2026. Capital inicial $10,000. Trade size $500. Fee 0.1% por lado.
