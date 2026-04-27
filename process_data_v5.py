@@ -235,9 +235,193 @@ def add_4h_features(df: pd.DataFrame) -> pd.DataFrame:
     # Lag de price_divergence
     df["price_divergence_lag1"] = df["price_divergence"].shift(1)
 
+    # --- Nuevas features tecnicas (Binance) ---
+
+    # RSI 14 barras
+    delta = df["close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    df["rsi_14"] = 100 - (100 / (1 + rs))
+
+    # MACD histogram (EMA12 - EMA26 - signal EMA9)
+    ema12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["close"].ewm(span=26, adjust=False).mean()
+    macd_line = ema12 - ema26
+    df["macd_histogram"] = macd_line - macd_line.ewm(span=9, adjust=False).mean()
+
+    # Bollinger Band width: 2*std / media (volatilidad relativa)
+    roll20_mean = df["close"].rolling(20).mean()
+    roll20_std  = df["close"].rolling(20).std()
+    df["bb_width"] = (2 * roll20_std) / roll20_mean.replace(0, np.nan)
+
+    # ATR 14 normalizado por close
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - df["close"].shift(1)).abs(),
+        (df["low"]  - df["close"].shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    df["atr_14"] = tr.rolling(14).mean() / df["close"].replace(0, np.nan)
+
+    # Ratio volumen Binance vs media 24h (6 barras de 4h)
+    vol_mean_24h = df["volume"].rolling(6).mean()
+    df["volume_ratio"] = df["volume"] / vol_mean_24h.replace(0, np.nan)
+
+    # Skewness de retornos en ventana 72h (18 barras)
+    df["return_skew_72h"] = df["log_return"].rolling(18).skew()
+
+    # Lags adicionales
+    df["log_return_lag8"]  = df["log_return"].shift(8)
+    df["log_return_lag12"] = df["log_return"].shift(12)
+
+    # --- Nuevas features The Graph ---
+
+    # Proxy de APR de fees: feesUSD / TVL por barra
+    tvl = df["totalValueLockedUSD"].replace(0, np.nan)
+    df["fee_apr_proxy"] = df["feesUSD"] / tvl
+
+    # Cambio porcentual de TVL (liquidez entrando/saliendo)
+    df["tvl_change_pct"] = df["totalValueLockedUSD"].pct_change().replace(
+        [np.inf, -np.inf], np.nan)
+
+    # --- Nuevas features Dune ---
+
+    # Ratio de volumen retail (no-whale) sobre total
+    vol_uni = df["volume_uni"].replace(0, np.nan)
+    df["net_flow_proxy"] = (df["volume_uni"] - df["whale_volume_uni"]) / vol_uni
+
+    # --- Indicadores clasicos adicionales ---
+
+    # Stochastic %K y %D (N=14)
+    low14  = df["low"].rolling(14).min()
+    high14 = df["high"].rolling(14).max()
+    hl_range = (high14 - low14).replace(0, np.nan)
+    df["stoch_k"] = 100 * (df["close"] - low14) / hl_range
+    df["stoch_d"] = df["stoch_k"].rolling(3).mean()
+
+    # CCI — Commodity Channel Index (N=20)
+    tp      = (df["high"] + df["low"] + df["close"]) / 3
+    tp_mean = tp.rolling(20).mean()
+    tp_mad  = tp.rolling(20).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+    df["cci_20"] = (tp - tp_mean) / (0.015 * tp_mad.replace(0, np.nan))
+
+    # Williams %R (N=14)
+    df["williams_r"] = -100 * (high14 - df["close"]) / hl_range
+
+    # ROC — Rate of Change (N=10 barras = 40h)
+    df["roc_10"] = df["close"].pct_change(10) * 100
+
+    # OBV momentum: cambio del OBV acumulado en 10 barras (40h)
+    obv_sign      = np.sign(df["close"].diff()).fillna(0)
+    obv           = (obv_sign * df["volume"]).cumsum()
+    df["obv_momentum"] = obv - obv.shift(10)
+
+    # MFI — Money Flow Index (N=14)
+    mf         = tp * df["volume"]
+    pos_mf     = mf.where(tp.diff() > 0, 0).rolling(14).sum()
+    neg_mf     = mf.where(tp.diff() < 0, 0).rolling(14).sum()
+    df["mfi_14"] = 100 - (100 / (1 + pos_mf / neg_mf.replace(0, np.nan)))
+
+    # EMA ratio (EMA9 / EMA21) — tendencia continua
+    ema9  = df["close"].ewm(span=9,  adjust=False).mean()
+    ema21 = df["close"].ewm(span=21, adjust=False).mean()
+    df["ema_ratio"] = ema9 / ema21.replace(0, np.nan)
+
+    # Senal de cruce EMA9/EMA21 — señal primaria para meta-labeling con side
+    # +1 si EMA9 > EMA21 (tendencia alcista), -1 si EMA9 < EMA21 (bajista)
+    _ema_diff = ema9 - ema21
+    df["ema_signal"] = np.sign(_ema_diff).astype(float).replace(0.0, 1.0)
+
+    # ADX — fuerza de tendencia (N=14, Wilder smoothing via EWM)
+    up_move  = df["high"] - df["high"].shift(1)
+    dn_move  = df["low"].shift(1) - df["low"]
+    plus_dm  = pd.Series(
+        np.where((up_move > dn_move) & (up_move > 0), up_move, 0.0), index=df.index)
+    minus_dm = pd.Series(
+        np.where((dn_move > up_move) & (dn_move > 0), dn_move, 0.0), index=df.index)
+    tr_adx   = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - df["close"].shift(1)).abs(),
+        (df["low"]  - df["close"].shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    atr_adx  = tr_adx.ewm(span=14, adjust=False).mean().replace(0, np.nan)
+    plus_di  = 100 * plus_dm.ewm(span=14, adjust=False).mean() / atr_adx
+    minus_di = 100 * minus_dm.ewm(span=14, adjust=False).mean() / atr_adx
+    dx       = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    df["adx_14"] = dx.ewm(span=14, adjust=False).mean()
+
+    # Donchian Channel position (N=20): donde esta el precio en su rango
+    don_high = df["high"].rolling(20).max()
+    don_low  = df["low"].rolling(20).min()
+    df["donchian_pos"] = (df["close"] - don_low) / (don_high - don_low).replace(0, np.nan)
+
+    # VWAP deviation rolling (N=24 barras ~ 4 dias)
+    vwap_num = (df["close"] * df["volume"]).rolling(24).sum()
+    vwap_den = df["volume"].rolling(24).sum().replace(0, np.nan)
+    vwap     = vwap_num / vwap_den
+    df["vwap_dev"] = (df["close"] - vwap) / vwap.replace(0, np.nan)
+
+    # --- Features de direccion (para M2 del meta-labeling) ---
+
+    # Candle body ratio: (close-open)/(high-low) — fuerza direccional intrabar [-1, 1]
+    bar_range = (df["high"] - df["low"]).replace(0, np.nan)
+    df["body_ratio"] = (df["close"] - df["open"]) / bar_range
+
+    # Wicks: presion compradora y vendedora intrabar [0, 1]
+    df["upper_wick_ratio"] = (df["high"] - df["close"]) / bar_range
+    df["lower_wick_ratio"] = (df["close"] - df["low"]) / bar_range
+
+    # Bollinger %B: posicion del precio dentro de las bandas
+    upper_bb = roll20_mean + 2 * roll20_std
+    lower_bb = roll20_mean - 2 * roll20_std
+    df["bb_pct_b"] = (df["close"] - lower_bb) / (upper_bb - lower_bb).replace(0, np.nan)
+
+    # Precio relativo a su EMA21 — por encima/debajo de la tendencia
+    df["close_ema20_ratio"] = df["close"] / ema21.replace(0, np.nan)
+
+    # Lags finos de momentum
+    df["log_return_lag2"] = df["log_return"].shift(2)
+    df["log_return_lag3"] = df["log_return"].shift(3)
+    df["log_return_lag6"] = df["log_return"].shift(6)
+
+    # RSI divergence: cambio del RSI en 3 barras (proxy de divergencia)
+    df["rsi_divergence"] = df["rsi_14"] - df["rsi_14"].shift(3)
+
+    # --- Features de microestructura (Lopez de Prado cap. 19) ---
+
+    # BVC — Bulk Volume Classification (Easley et al. 2012)
+    # Estima fraccion de volumen buyer-initiated usando direccion del precio
+    # Z = Φ(log_return / σ) → buy_vol = Z*V, sell_vol = (1-Z)*V
+    from scipy.special import ndtr as _norm_cdf
+    _sigma_bvc = df["log_return"].rolling(20).std().replace(0, np.nan)
+    _z         = pd.Series(_norm_cdf(df["log_return"] / _sigma_bvc), index=df.index)
+    _buy_vol   = _z * df["volume"]
+    _sell_vol  = (1 - _z) * df["volume"]
+    _roll_v    = df["volume"].rolling(12).sum().replace(0, np.nan)
+    df["bvc_imbalance"] = (_buy_vol - _sell_vol).rolling(12).sum() / _roll_v
+
+    # Amihud Illiquidity — |retorno| / volumen en USD (rolling 12 barras = 48h)
+    # Alta iliquidez = gran movimiento por poco volumen = mercado thin
+    _dollar_vol = df["volumeUSD"].replace(0, np.nan)
+    df["amihud_illiquidity"] = (df["log_return"].abs() / _dollar_vol).rolling(12).mean()
+
+    # Roll's Spread — estimador de bid-ask spread implicito (rolling 20 barras)
+    # spread = 2 * sqrt(max(-cov(ΔP_t, ΔP_{t-1}), 0)), normalizado por close
+    _delta_c = df["close"].diff()
+    _cov     = _delta_c.rolling(20).cov(_delta_c.shift(1))
+    df["roll_spread"] = 2 * np.sqrt(np.maximum(-_cov, 0)) / df["close"].replace(0, np.nan)
+
     # Winsorizar outliers (IQR 3x)
-    for col in ["log_return", "transfer_count_pct_change", "volume_tvl_ratio",
-                "high_low_range", "whale_volume_ratio"]:
+    _winsor_cols = [
+        "log_return", "transfer_count_pct_change", "volume_tvl_ratio",
+        "high_low_range", "whale_volume_ratio",
+        "volume_ratio", "return_skew_72h", "tvl_change_pct", "net_flow_proxy",
+        "macd_histogram", "bb_width", "atr_14",
+        "cci_20", "roc_10", "obv_momentum", "vwap_dev",
+        "bb_pct_b", "close_ema20_ratio", "rsi_divergence",
+        "bvc_imbalance", "amihud_illiquidity", "roll_spread",
+    ]
+    for col in _winsor_cols:
         if col not in df.columns:
             continue
         q1, q3 = df[col].quantile(0.25), df[col].quantile(0.75)

@@ -7,9 +7,9 @@ Implementacion fiel al pseudocodigo del libro, adaptada a pandas moderno
   -1  stop-loss tocado primero
    0  expiro la barrera temporal sin tocar ninguna
 
-Parametros por defecto del pipeline v4:
-  ptSl = [1, 1] (barreras simetricas)
-  side = 1 (neutral, sin direccion previa)
+Parametros por defecto del pipeline v6:
+  ptSl = [2, 1] (asimetrico: PT=2x, SL=1x — ratio 2:1 a favor del apostador)
+  side = EMA9/EMA21 crossover signal (+1 long, -1 short)
   trgt = rolling(20).std() del log_return del close como retorno %
   t1   = 12 velas (4h -> 48h) | 5 velas (daily -> 5 dias)
 """
@@ -237,6 +237,7 @@ def build_labels_triple_barrier(
     ptSl: list | None = None,
     vol_span: int = 20,
     min_ret: float = 0.0,
+    side_series: pd.Series | None = None,
 ) -> pd.DataFrame:
     """
     Entry point del pipeline v4.
@@ -249,7 +250,7 @@ def build_labels_triple_barrier(
     alineadas al indice original (t_start).
     """
     if ptSl is None:
-        ptSl = [2.0, 2.0]
+        ptSl = [2.0, 1.0]
 
     # Garantizar indice temporal
     df = df.copy()
@@ -273,6 +274,14 @@ def build_labels_triple_barrier(
     # Quedarse solo con los que tienen trgt valida
     t_events = t_events[t_events.isin(trgt.dropna().index)]
 
+    # Alinear side_series al indice del close si se provee
+    side_aligned: pd.Series | None = None
+    if side_series is not None:
+        side_aligned = side_series.reindex(close.index).ffill()
+        n_long  = int((side_aligned > 0).sum())
+        n_short = int((side_aligned < 0).sum())
+        print(f"  [triple-barrier] side: long={n_long} | short={n_short}")
+
     print(f"  [triple-barrier] freq={freq} | eventos CUSUM={len(t_events)} "
           f"(de {len(trgt.dropna())} totales) | num_bars t1={num_bars} | ptSl={ptSl}")
 
@@ -283,7 +292,7 @@ def build_labels_triple_barrier(
         trgt=trgt,
         min_ret=min_ret,
         num_bars=num_bars,
-        side=None,
+        side=side_aligned,
     )
     if events.empty:
         print("  [triple-barrier] WARN: sin eventos generados")
