@@ -268,8 +268,8 @@ def main():
     print(f"  M2 k={sfs_m2['best_k']} features: {features_m2}\n")
 
     print(f"  {'Modelo':<8} {'Net P&L':>12}  {'Sharpe':>7}  {'MaxDD%':>7}  "
-          f"{'Acc':>6}  {'F1m':>6}  {'F1-M1':>7}  {'Trades':>7}  {'%Flat':>6}")
-    print("  " + "-" * 82)
+          f"{'Acc':>6}  {'F1-mac':>7}  {'AUC-OvR':>8}  {'F1-M1':>7}  {'Trades':>7}  {'%Flat':>6}")
+    print("  " + "-" * 96)
 
     for name in ["LGBM", "LGBM_F", "XGB", "XGB_F", "MLP", "MLP_F", "BH"]:
         if name not in results:
@@ -277,16 +277,17 @@ def main():
         d    = results[name]
         fin  = d.get("financial_stats") or {}
         cls  = d.get("classification_metrics") or {}
-        acc  = cls.get("accuracy", float("nan"))
-        f1m  = cls.get("f1_macro", float("nan"))
-        f1m1 = d.get("f1_m1", float("nan"))
-        pnl  = fin.get("net_pnl_usd", 0)
-        shr  = fin.get("sharpe_ratio", 0)
-        dd   = fin.get("max_dd_pct", 0)
-        tr   = fin.get("total_trades", 0)
-        fl   = fin.get("pct_flat", 0)
+        acc  = cls.get("accuracy",    float("nan"))
+        f1m  = cls.get("f1_macro",    float("nan"))
+        auc  = cls.get("roc_auc_ovr", float("nan"))
+        f1m1 = d.get("f1_m1",         float("nan"))
+        pnl  = fin.get("net_pnl_usd",   0)
+        shr  = fin.get("sharpe_ratio",  0)
+        dd   = fin.get("max_dd_pct",    0)
+        tr   = fin.get("total_trades",  0)
+        fl   = fin.get("pct_flat",      0)
         print(f"  {name:<8} ${pnl:>+11,.2f}  {shr:>7.3f}  {dd:>6.2f}%  "
-              f"{acc:>6.3f}  {f1m:>6.3f}  {f1m1:>7.3f}  {tr:>7}  {fl:>5.1f}%")
+              f"{acc:>6.3f}  {f1m:>7.3f}  {auc:>8.3f}  {f1m1:>7.3f}  {tr:>7}  {fl:>5.1f}%")
 
     print("\n  Curvas SFS guardadas en: sfs_meta_curves.png")
 
